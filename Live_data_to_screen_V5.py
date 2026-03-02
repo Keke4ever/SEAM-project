@@ -9,7 +9,8 @@ from bluezero import peripheral
 from bluezero import adapter
 import threading
 import queue
-
+import sys
+import signal as sig
 
 stop_evt = threading.Event()
 raw_q = queue.Queue(maxsize=4000)     
@@ -164,8 +165,7 @@ def notify_callback(notifying, charcteristic):
             print("just notifies")
 
 
-def Sensor_thread():
-    while not stop_evt.is_set():
+def sensor_thread():
         period = 1.0 / 100
         with SMBus(BUSNUM) as bus:
             reset(bus)
@@ -178,32 +178,32 @@ def Sensor_thread():
             # ----------------------------
             # Acquisition loop
             # ----------------------------
-            
-            n = available_samples(bus)
-            if n == 0:
-                time.sleep(0.01)
-                continue
-            
-            now_ms = int(time.monotonic() * 1000) & 0xFFFFFFFF
-            for _ in range(n):
-                red, ir = read_sample(bus)
-                try:
-                    raw_q.put_nowait((now_ms, ir, red))
-                except queue.Full:
-                    # drop oldest by draining a bit
+            while not stop_evt.is_set():
+                n = available_samples(bus)
+                if n == 0:
+                    time.sleep(0.01)
+                    continue
+                
+                now_ms = int(time.monotonic() * 1000) & 0xFFFFFFFF
+                for _ in range(n):
+                    red, ir = read_sample(bus)
                     try:
-                        raw_q.get_nowait()
                         raw_q.put_nowait((now_ms, ir, red))
-                    except queue.Empty:
-                        pass
-            
-            next_tick += period
-            dt = next_tick - time.time()
-            if dt > 0:
-                time.sleep(min(dt, 0.01))
-            else:
-                # we're behind; resync
-                next_tick = time.time()   
+                    except queue.Full:
+                        # drop oldest by draining a bit
+                        try:
+                            raw_q.get_nowait()
+                            raw_q.put_nowait((now_ms, ir, red))
+                        except queue.Empty:
+                            pass
+                
+                next_tick += period
+                dt = next_tick - time.time()
+                if dt > 0:
+                    time.sleep(min(dt, 0.01))
+                else:
+                    # we're behind; resync
+                    next_tick = time.time()   
                 
 
             time.sleep(0.02)
@@ -288,30 +288,10 @@ def processing_thread():
         filtered_IR=signal.filtfilt(b, a, red_raw_buf)
         hr = Heart_rate(filtered_red, SAMPLE_HZ)
         spo2 = SPO2(red_raw_buf, ir_raw_buf,filtered_red,filtered_IR)
-        
+        Data=str(hr) + "," + str(spo2)
+        data_queue.put(Data)
 
-
-def handle_sig(sig, frame):
-    stop_evt.set()
-
-def main():
-    signal.signal(signal.SIGINT, handle_sig)
-    signal.signal(signal.SIGTERM, handle_sig)
-
-    t1 = threading.Thread(target=sensor_thread, daemon=True)
-    t2 = threading.Thread(target=processing_thread, daemon=True)
-    
-
-    t1.start(); t2.start(); t3.start()
-
-    
-
-    data_thread = threading.Thread(
-        target=Heart_rate_and_SPO2,
-        daemon=True      # dies automatically when main script exits
-    )
-    data_thread.start()
-
+def peripheral():
     # Give collector a moment to get first reading
     time.sleep(1)
     # Auto-detect Bluetooth adapter
@@ -355,10 +335,26 @@ def main():
     ble.publish()
     
 
-    t1 = threading.Thread(Heart_rate_and_SPO2)
-    t1.start()
-    ble.publish()
 
+
+def handle_sig(sig, frame):
+    stop_evt.set()
+
+
+def main():
+    sig.signal(signal.SIGINT, handle_sig)
+    sig.signal(signal.SIGTERM, handle_sig)
+
+    t1 = threading.Thread(target=sensor_thread, daemon=True)
+    t2 = threading.Thread(target=processing_thread, daemon=True)
+    t3=threading.Thread(target=peripheral, daemon=True)
+
+    t1.start(); t2.start(); t3.start()
+
+    # Give collector a moment to get first reading
+    time.sleep(1)
+    # Auto-detect Bluetooth adapter
+    
     print("SEAM Pi0 streamer running. Ctrl+C to stop.")
     try:
         while not stop_evt.is_set():
@@ -369,12 +365,6 @@ def main():
     print("Stopping...")
     time.sleep(0.5)
     sys.exit(0)
-    
-  
-
-  
-
- 
     
 
 if __name__ == "__main__":
