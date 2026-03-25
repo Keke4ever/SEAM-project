@@ -1,0 +1,501 @@
+/*
+   ESP32 BLE Bridge for SEAM
+   ----------------------------------------
+   Role 1: BLE Client to Raspberry Pi Zero 2W
+   Role 2: BLE Server/Peripheral to Mobile/Web App
+   Role 3: Update LCD with latest values
+
+   Data flow:
+   Pi Zero ---> ESP32 ---> LCD
+                    \
+                     ---> Mobile/Web App
+
+   Expected Pi BLE payload examples:
+   "HR:78,SPO2:98"
+   or
+   "78,98"
+
+   App subscribes to notify characteristic on ESP32.
+   App may also write commands to ESP32 using the write characteristic.
+*/
+
+#include <Arduino.h>
+#include <NimBLEDevice.h>
+
+// ======================================================
+//                     USER SETTINGS
+// ======================================================
+
+// ---- Pi BLE Service / Characteristic UUIDs ----
+// These MUST match the UUIDs used by the Raspberry Pi BLE peripheral
+static const char* PI_SERVICE_UUID        = "12345678-1234-1234-1234-1234567890ab";
+static const char* PI_CHARACTERISTIC_UUID = "abcd1234-5678-1234-5678-abcdef123456";
+
+// ---- ESP32 BLE Service / Characteristic UUIDs for App ----
+static const char* ESP_SERVICE_UUID       = "87654321-4321-4321-4321-ba0987654321";
+static const char* ESP_NOTIFY_CHAR_UUID   = "11111111-2222-3333-4444-555555555555";
+static const char* ESP_WRITE_CHAR_UUID    = "66666666-7777-8888-9999-aaaaaaaaaaaa";
+
+// Optional: set Pi advertised device name here for easier matching
+static const char* TARGET_PI_NAME = "SEAM_PI0";
+
+// ======================================================
+//                  GLOBAL STATE / DATA
+// ======================================================
+
+NimBLEAdvertisedDevice* foundPiDevice = nullptr;
+NimBLEClient* piClient = nullptr;
+NimBLERemoteCharacteristic* piRemoteChar = nullptr;
+
+NimBLEServer* espServer = nullptr;
+NimBLECharacteristic* espNotifyChar = nullptr;
+NimBLECharacteristic* espWriteChar = nullptr;
+
+bool piConnected = false;
+bool appConnected = false;
+bool shouldConnectToPi = false;
+bool piFound = false;
+
+// Latest data received from Pi
+int heartRate = 0;
+int spo2 = 0;
+String latestPayload = "HR:0,SPO2:0";
+
+// Timing
+unsigned long lastScanAttempt = 0;
+unsigned long lastStatusPrint = 0;
+const unsigned long scanIntervalMs = 5000;
+
+// ======================================================
+//                   LCD PLACEHOLDER HOOKS
+// ======================================================
+// Replace these functions with your actual LCD / round display code.
+// Right now they print to Serial so the bridge logic is easy to test first.
+
+void initDisplay() {
+  Serial.println("[LCD] Display initialized");
+  // Put your real LCD init code here
+}
+
+void showBootScreen() {
+  Serial.println("[LCD] SEAM Bridge Booting...");
+  // Put your splash screen code here
+}
+
+void updateDisplayData(int hr, int oxygen, const String& piStatus, const String& appStatus) {
+  Serial.println("========== LCD UPDATE ==========");
+  Serial.print("HR: ");
+  Serial.println(hr);
+  Serial.print("SpO2: ");
+  Serial.println(oxygen);
+  Serial.print("Pi: ");
+  Serial.println(piStatus);
+  Serial.print("App: ");
+  Serial.println(appStatus);
+  Serial.println("================================");
+
+  // Put your real LCD update code here
+  // Example:
+  // tft.fillScreen(TFT_BLACK);
+  // tft.setCursor(0, 0);
+  // tft.printf("HR: %d\n", hr);
+  // tft.printf("SpO2: %d\n", oxygen);
+  // tft.printf("Pi: %s\n", piStatus.c_str());
+  // tft.printf("App: %s\n", appStatus.c_str());
+}
+
+// ======================================================
+//                  HELPER / PARSE FUNCTIONS
+// ======================================================
+
+bool parseVitals(String incoming, int& hr, int& oxygen) {
+  incoming.trim();
+
+  // Format 1: HR:78,SPO2:98
+  int hrIndex = incoming.indexOf("HR:");
+  int spo2Index = incoming.indexOf("SPO2:");
+
+  if (hrIndex != -1 && spo2Index != -1) {
+    int commaIndex = incoming.indexOf(',', hrIndex);
+    if (commaIndex == -1) return false;
+
+    String hrStr = incoming.substring(hrIndex + 3, commaIndex);
+    String spo2Str = incoming.substring(spo2Index + 5);
+
+    hrStr.trim();
+    spo2Str.trim();
+
+    hr = hrStr.toInt();
+    oxygen = spo2Str.toInt();
+
+    return (hr > 0 && oxygen > 0);
+  }
+
+  // Format 2: 78,98
+  int commaIndex = incoming.indexOf(',');
+  if (commaIndex != -1) {
+    String hrStr = incoming.substring(0, commaIndex);
+    String spo2Str = incoming.substring(commaIndex + 1);
+
+    hrStr.trim();
+    spo2Str.trim();
+
+    hr = hrStr.toInt();
+    oxygen = spo2Str.toInt();
+
+    return (hr > 0 && oxygen > 0);
+  }
+
+  return false;
+}
+
+void forwardToApp(const String& payload) {
+  if (espNotifyChar != nullptr) {
+    espNotifyChar->setValue(payload.c_str());
+    espNotifyChar->notify();
+    Serial.print("[APP NOTIFY] Sent to app: ");
+    Serial.println(payload);
+  }
+}
+
+void refreshDisplay() {
+  updateDisplayData(
+    heartRate,
+    spo2,
+    piConnected ? "Connected" : "Disconnected",
+    appConnected ? "Connected" : "Disconnected"
+  );
+}
+
+// ======================================================
+//          ESP32 BLE SERVER CALLBACKS (APP SIDE)
+// ======================================================
+
+class ESPServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
+    appConnected = true;
+    Serial.println("[APP] App connected to ESP32 BLE server");
+    refreshDisplay();
+  }
+
+  void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
+    appConnected = false;
+    Serial.println("[APP] App disconnected");
+    NimBLEDevice::startAdvertising();
+    refreshDisplay();
+  }
+};
+
+class AppWriteCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override {
+    std::string rx = pCharacteristic->getValue();
+    String cmd = String(rx.c_str());
+    cmd.trim();
+
+    Serial.print("[APP WRITE] Received command from app: ");
+    Serial.println(cmd);
+
+    // Example commands from app
+    if (cmd == "PING") {
+      Serial.println("[APP WRITE] PING received");
+    } 
+    else if (cmd == "REQ_DATA") {
+      forwardToApp(latestPayload);
+    } 
+    else if (cmd == "STATUS") {
+      String statusMsg = "PI:";
+      statusMsg += (piConnected ? "1" : "0");
+      statusMsg += ",APP:";
+      statusMsg += (appConnected ? "1" : "0");
+      forwardToApp(statusMsg);
+    }
+    else {
+      Serial.println("[APP WRITE] Unknown command");
+    }
+  }
+};
+
+// ======================================================
+//       BLE CLIENT CALLBACKS (ESP32 -> PI SIDE)
+// ======================================================
+
+class PIClientCallbacks : public NimBLEClientCallbacks {
+  void onConnect(NimBLEClient* pClient) override {
+    piConnected = true;
+    Serial.println("[PI] Connected to Raspberry Pi BLE peripheral");
+    refreshDisplay();
+  }
+
+  void onDisconnect(NimBLEClient* pClient, int reason) override {
+    piConnected = false;
+    piRemoteChar = nullptr;
+    Serial.println("[PI] Disconnected from Raspberry Pi");
+    refreshDisplay();
+
+    // Trigger reconnect logic
+    shouldConnectToPi = false;
+    piFound = false;
+    foundPiDevice = nullptr;
+  }
+
+  uint32_t onPassKeyDisplay() override {
+    Serial.println("[PI] Passkey requested");
+    return 0;
+  }
+
+  bool onConfirmPIN(uint32_t pin) override {
+    Serial.print("[PI] Confirm PIN: ");
+    Serial.println(pin);
+    return true;
+  }
+
+  bool onConnParamsUpdateRequest(NimBLEClient* pClient, const ble_gap_upd_params* params) override {
+    return true;
+  }
+};
+
+// ======================================================
+//        REMOTE NOTIFY CALLBACK (FROM PI TO ESP32)
+// ======================================================
+
+void piNotifyCallback(
+  NimBLERemoteCharacteristic* pRemoteCharacteristic,
+  uint8_t* pData,
+  size_t length,
+  bool isNotify
+) {
+  String incoming = "";
+  for (size_t i = 0; i < length; i++) {
+    incoming += (char)pData[i];
+  }
+
+  incoming.trim();
+  Serial.print("[PI NOTIFY] Received from Pi: ");
+  Serial.println(incoming);
+
+  int newHR = 0;
+  int newSpO2 = 0;
+
+  if (parseVitals(incoming, newHR, newSpO2)) {
+    heartRate = newHR;
+    spo2 = newSpO2;
+    latestPayload = "HR:" + String(heartRate) + ",SPO2:" + String(spo2);
+
+    refreshDisplay();
+    forwardToApp(latestPayload);
+  } else {
+    Serial.println("[PARSE] Failed to parse incoming data");
+  }
+}
+
+// ======================================================
+//              PI SCAN CALLBACKS
+// ======================================================
+
+class PIAdvertisedDeviceCallbacks : public NimBLEScanCallbacks {
+  void onResult(const NimBLEAdvertisedDevice* advertisedDevice) override {
+    Serial.print("[SCAN] Found device: ");
+    Serial.println(advertisedDevice->toString().c_str());
+
+    bool nameMatch = advertisedDevice->getName() == TARGET_PI_NAME;
+    bool serviceMatch = advertisedDevice->isAdvertisingService(NimBLEUUID(PI_SERVICE_UUID));
+
+    if (nameMatch || serviceMatch) {
+      Serial.println("[SCAN] Target Raspberry Pi device found");
+
+      foundPiDevice = new NimBLEAdvertisedDevice(*advertisedDevice);
+      piFound = true;
+      shouldConnectToPi = true;
+
+      NimBLEDevice::getScan()->stop();
+    }
+  }
+
+  void onScanEnd(const NimBLEScanResults& results, int reason) override {
+    Serial.println("[SCAN] Scan ended");
+  }
+};
+
+// ======================================================
+//                  START ESP32 SERVER
+// ======================================================
+
+void startESPServer() {
+  espServer = NimBLEDevice::createServer();
+  espServer->setCallbacks(new ESPServerCallbacks());
+
+  NimBLEService* service = espServer->createService(ESP_SERVICE_UUID);
+
+  // Notify characteristic: app subscribes here for live vitals
+  espNotifyChar = service->createCharacteristic(
+    ESP_NOTIFY_CHAR_UUID,
+    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
+  );
+  espNotifyChar->setValue("HR:0,SPO2:0");
+
+  // Write characteristic: app can send commands here
+  espWriteChar = service->createCharacteristic(
+    ESP_WRITE_CHAR_UUID,
+    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::READ
+  );
+  espWriteChar->setValue("READY");
+  espWriteChar->setCallbacks(new AppWriteCallbacks());
+
+  service->start();
+
+  NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
+  advertising->addServiceUUID(ESP_SERVICE_UUID);
+  advertising->setName("SEAM_ESP32_BRIDGE");
+  advertising->start();
+
+  Serial.println("[ESP SERVER] BLE server started for app");
+}
+
+// ======================================================
+//              CONNECT TO PI AS CLIENT
+// ======================================================
+
+bool connectToPi() {
+  if (!foundPiDevice) {
+    Serial.println("[PI CONNECT] No Pi device found");
+    return false;
+  }
+
+  Serial.println("[PI CONNECT] Attempting connection to Pi...");
+
+  if (piClient == nullptr) {
+    piClient = NimBLEDevice::createClient();
+    piClient->setClientCallbacks(new PIClientCallbacks(), false);
+  }
+
+  if (!piClient->connect(foundPiDevice)) {
+    Serial.println("[PI CONNECT] Connection to Pi failed");
+    return false;
+  }
+
+  NimBLERemoteService* remoteService = piClient->getService(PI_SERVICE_UUID);
+  if (!remoteService) {
+    Serial.println("[PI CONNECT] Pi service not found");
+    piClient->disconnect();
+    return false;
+  }
+
+  piRemoteChar = remoteService->getCharacteristic(PI_CHARACTERISTIC_UUID);
+  if (!piRemoteChar) {
+    Serial.println("[PI CONNECT] Pi characteristic not found");
+    piClient->disconnect();
+    return false;
+  }
+
+  if (piRemoteChar->canNotify()) {
+    if (!piRemoteChar->subscribe(true, piNotifyCallback)) {
+      Serial.println("[PI CONNECT] Failed to subscribe to Pi notify characteristic");
+      piClient->disconnect();
+      return false;
+    }
+    Serial.println("[PI CONNECT] Subscribed to Pi notifications");
+  } else if (piRemoteChar->canRead()) {
+    std::string value = piRemoteChar->readValue();
+    String incoming = String(value.c_str());
+
+    Serial.print("[PI CONNECT] Initial read from Pi: ");
+    Serial.println(incoming);
+
+    int newHR = 0;
+    int newSpO2 = 0;
+    if (parseVitals(incoming, newHR, newSpO2)) {
+      heartRate = newHR;
+      spo2 = newSpO2;
+      latestPayload = "HR:" + String(heartRate) + ",SPO2:" + String(spo2);
+      refreshDisplay();
+      forwardToApp(latestPayload);
+    }
+  } else {
+    Serial.println("[PI CONNECT] Pi characteristic is neither notify nor readable");
+    piClient->disconnect();
+    return false;
+  }
+
+  return true;
+}
+
+// ======================================================
+//                     START PI SCAN
+// ======================================================
+
+void startPiScan() {
+  Serial.println("[SCAN] Starting scan for Raspberry Pi...");
+
+  NimBLEScan* scan = NimBLEDevice::getScan();
+  scan->setScanCallbacks(new PIAdvertisedDeviceCallbacks(), false);
+  scan->setActiveScan(true);
+  scan->setInterval(100);
+  scan->setWindow(100);
+  scan->start(5, false, true);
+}
+
+// ======================================================
+//                         SETUP
+// ======================================================
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  Serial.println();
+  Serial.println("==================================");
+  Serial.println("SEAM ESP32 BLE Bridge Starting...");
+  Serial.println("==================================");
+
+  initDisplay();
+  showBootScreen();
+
+  NimBLEDevice::init("SEAM_ESP32_BRIDGE");
+
+  startESPServer();
+  startPiScan();
+
+  refreshDisplay();
+}
+
+// ======================================================
+//                          LOOP
+// ======================================================
+
+void loop() {
+  unsigned long now = millis();
+
+  // If Pi was found during scan, attempt connection
+  if (shouldConnectToPi && !piConnected) {
+    shouldConnectToPi = false;
+
+    if (connectToPi()) {
+      Serial.println("[MAIN] Pi connection successful");
+    } else {
+      Serial.println("[MAIN] Pi connection failed, will rescan");
+      piFound = false;
+      foundPiDevice = nullptr;
+    }
+  }
+
+  // Re-scan if Pi is not connected
+  if (!piConnected && (now - lastScanAttempt >= scanIntervalMs)) {
+    lastScanAttempt = now;
+    startPiScan();
+  }
+
+  // Optional periodic status print
+  if (now - lastStatusPrint >= 5000) {
+    lastStatusPrint = now;
+    Serial.println("----------- STATUS -----------");
+    Serial.print("Pi connected: ");
+    Serial.println(piConnected ? "YES" : "NO");
+    Serial.print("App connected: ");
+    Serial.println(appConnected ? "YES" : "NO");
+    Serial.print("Latest payload: ");
+    Serial.println(latestPayload);
+    Serial.println("------------------------------");
+  }
+
+  delay(50);
+}
