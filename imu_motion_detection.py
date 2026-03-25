@@ -18,7 +18,7 @@ ORIENTATION_THRESHOLD    = 5.0    # degrees — Euler angle change to flag rotat
 GYRO_THRESHOLD           = 0.3    # rad/s — gyro magnitude to flag spinning
 LINEAR_DOMINANT_RATIO    = 2.5    # lin_mag must be this × gyro_equiv to count as "linear"
 STILL_DURATION           = 2.0    # seconds of no motion before "still" reported
-SAMPLE_RATE              = 0.1    # seconds between samples (10 Hz)
+SAMPLE_RATE              = 0.35    # seconds between samples (10 Hz)
 
 # ── ANSI colour helpers ───────────────────────────────────────────────────────
 RESET  = "\033[0m"
