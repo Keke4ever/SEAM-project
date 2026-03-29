@@ -435,6 +435,41 @@ def notify_callback(notifying, characteristic):
         _notify_active = False
         print("[BLE] Notify stopped")
 
+def peripheral_ble():
+    time.sleep(1)   # let sensor threads warm up
+
+    adapter_address = list(adapter.Adapter.available())[0].address
+    print(f"[BLE] Adapter: {adapter_address}")
+
+    ble = peripheral.Peripheral(
+        adapter_address=adapter_address,
+        local_name="PI-3",
+        appearance=0,
+    )
+
+    ble.on_connect    = on_connect
+    ble.on_disconnect = on_disconnect
+
+    # Single service — same UUIDs the ESP32 already knows
+    ble.add_service(
+        srv_id=1,
+        uuid="6d4f9c2a-1c2b-4b3d-9b9c-3e3a7f7b2b10",
+        primary=True,
+    )
+
+    ble.add_characteristic(
+        srv_id=1,
+        chr_id=1,
+        uuid="c3a9f0a1-7f22-4c1a-9a8e-67e3c3c38a11",
+        value=[],
+        notifying=False,
+        flags=["read", "notify"],
+        read_callback=read_callback,
+        notify_callback=notify_callback,
+    )
+
+    print("[BLE] Advertising as PI-3 — waiting for client…")
+    ble.publish()
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIGNAL HANDLER
 # ═══════════════════════════════════════════════════════════════════════════════
