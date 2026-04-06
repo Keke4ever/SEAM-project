@@ -213,10 +213,10 @@ def wait_for_calibration(imu):
 #
 # Thresholds (tunable):
 FREEFALL_RAW_THRESH   = 1.0    # m/s²  — raw accel magnitude for freefall
-IMPACT_THRESH         = 12.0   # m/s²  — lin accel spike = hard landing / fall
-JUMP_AIRTIME_MIN      = 0.08   # s     — minimum freefall gap to count as jump
+IMPACT_THRESH         = 6.0   # m/s²  — lin accel spike = hard landing / fall
+JUMP_AIRTIME_MIN      = 0.03   # s     — minimum freefall gap to count as jump
 JUMP_AIRTIME_MAX      = 0.80   # s     — longer than this → likely a fall
-SLIP_LATERAL_THRESH   = 6.0    # m/s²  — sudden side accel for slip detection
+SLIP_LATERAL_THRESH   = 3.0    # m/s²  — sudden side accel for slip detection
 SLIP_ORI_THRESH       = 30.0   # °     — rapid orientation change (roll/pitch)
 WALK_CADENCE_MIN      = 1.0    # steps/s
 WALK_CADENCE_MAX      = 2.8    # steps/s
