@@ -138,7 +138,7 @@ def calc_hr(filt_red):
 CAL_FILE = os.path.expanduser("~/.bno055_cal.json")
 
 MOTION_ACCEL_THRESHOLD = 1.5    # m/s²
-IMPACT_THRESHOLD       = 8.0    # m/s²
+IMPACT_THRESHOLD       = 5.0    # m/s²
 FREEFALL_THRESHOLD     = 1.0    # m/s²
 ORIENTATION_THRESHOLD  = 5.0    # degrees
 LINEAR_DOMINANT_RATIO  = 2.5
