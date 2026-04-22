@@ -409,30 +409,30 @@ def sensor_thread():
         print(f"[MAX30102] Reading at 0x{ADDR:02X}…")
         header = ['IR', 'RED']
 
-            start_time = time.monotonic()
-            while not stop_evt.is_set():
-                n = available_samples(bus)
-                if n == 0:
-                    time.sleep(0.01)
-                    continue
-                now_ms = int(time.monotonic() - start_time) & 0xFFFFFFFF
-                for _ in range(n):
-                    red, ir = read_sample(bus)
-                    time.sleep(1)
+        start_time = time.monotonic()
+        while not stop_evt.is_set():
+            n = available_samples(bus)
+            if n == 0:
+                time.sleep(0.01)
+                continue
+            now_ms = int(time.monotonic() - start_time) & 0xFFFFFFFF
+            for _ in range(n):
+                red, ir = read_sample(bus)
+                time.sleep(1)
+                try:
+                    raw_q.put_nowait((now_ms, ir, red))
+                except queue.Full:
                     try:
+                        raw_q.get_nowait()
                         raw_q.put_nowait((now_ms, ir, red))
-                    except queue.Full:
-                        try:
-                            raw_q.get_nowait()
-                            raw_q.put_nowait((now_ms, ir, red))
-                        except queue.Empty:
-                            pass
-                next_tick += period
-                dt = next_tick - time.time()
-                if dt > 0:
-                    time.sleep(min(dt, 0.01))
-                else:
-                    next_tick = time.time()
+                    except queue.Empty:
+                        pass
+            next_tick += period
+            dt = next_tick - time.time()
+            if dt > 0:
+                time.sleep(min(dt, 0.01))
+            else:
+                next_tick = time.time()
     print("[MAX30102] Thread stopped")
 
 # ═══════════════════════════════════════════════════════════════════════════════
