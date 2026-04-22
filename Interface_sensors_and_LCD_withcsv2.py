@@ -444,7 +444,7 @@ def processing_thread():
     ir_buf = []; red_buf = []
 
     while not stop_evt.is_set():
-         with open('Raw_data_3.csv', 'a', newline='') as f:
+        with open('Raw_data_3.csv', 'a', newline='') as f:
             writer = csv.writer(f)
            
             header= ["Time", "IR", "Red"]
