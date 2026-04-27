@@ -81,6 +81,7 @@ static bool               appConnected = false;
 volatile int heartRate = 0;
 volatile int SpO2      = 0;
 volatile float temperatureF = 0.0f;
+static bool hasSensorData = false;
 
 enum ActivityState {
   ACT_STILL, ACT_WALKING, ACT_RUNNING, ACT_JUMPING, ACT_MOVING, ACT_UNKNOWN
@@ -127,8 +128,6 @@ static bool          remoteFallLatched   = false;
 static uint32_t      alertSuppressUntil  = 0;
 static uint32_t      lastWebDataMillis   = 0;
 static const uint32_t WEB_DATA_TIMEOUT_MS = 10000;
-static uint32_t      lastReadPollMs      = 0;
-static const uint32_t READ_POLL_MS       = 1000;
 static uint32_t      lastUiRefreshMs     = 0;
 static const uint32_t UI_REFRESH_MS      = 250;
 
@@ -452,6 +451,7 @@ static bool processIncomingPayload(const String& rawPayload) {
   heartRate = hr;
   SpO2 = spo2;
   activityState = parsedActivity;
+  hasSensorData = true;
 
   if (parsedFall == FALL_NORMAL) {
     remoteFallLatched = false;
@@ -583,24 +583,24 @@ static void build_main_screen() {
   lv_obj_set_style_border_width(status_dot, 0, 0);
 
   hr_label = lv_label_create(main_screen);
-  lv_label_set_text(hr_label, "HR: -- bpm\nSpO2: --%");
+  lv_label_set_text(hr_label, "HR: --\nSpO2: --");
   lv_obj_set_style_text_align(hr_label, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_set_style_text_color(hr_label, lv_color_hex(0xFFFFFF), 0);
   lv_obj_set_style_text_font(hr_label, UI_FONT_BODY, 0);
-  lv_obj_align(hr_label, LV_ALIGN_CENTER, 0, -42);
+  lv_obj_align(hr_label, LV_ALIGN_CENTER, 0, -35);
 
   lv_obj_t* divider = lv_obj_create(main_screen);
-  lv_obj_set_size(divider, 170, 2);
-  lv_obj_align(divider, LV_ALIGN_CENTER, 0, 2);
+  lv_obj_set_size(divider, 160, 2);
+  lv_obj_align(divider, LV_ALIGN_CENTER, 0, 0);
   lv_obj_set_style_bg_color(divider, lv_color_hex(0x444444), 0);
   lv_obj_set_style_border_width(divider, 0, 0);
 
   activity_label = lv_label_create(main_screen);
-  lv_label_set_text(activity_label, "Activity\n--");
+  lv_label_set_text(activity_label, "Activity:\n--");
   lv_obj_set_style_text_align(activity_label, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_set_style_text_color(activity_label, lv_color_hex(0x888888), 0);
   lv_obj_set_style_text_font(activity_label, UI_FONT_BODY, 0);
-  lv_obj_align(activity_label, LV_ALIGN_CENTER, 0, 48);
+  lv_obj_align(activity_label, LV_ALIGN_CENTER, 0, 38);
 
   lv_scr_load(main_screen);
 }
@@ -823,39 +823,65 @@ static void refresh_ui(bool force = false) {
   if (!force && !update_UI) return;
   update_UI = false;
 
+  // Match the older working flow: don't redraw the monitoring labels over
+  // active alert/response screens.
+  if (uiMode != UI_MAIN) return;
+
   if (hr_label) {
-    char buf[48];
-    if (connected_status) {
+    char buf[40];
+    if (hasSensorData) {
       snprintf(buf, sizeof(buf), "HR: %d bpm\nSpO2: %d%%", heartRate, SpO2);
-      lv_obj_set_style_bg_color(status_dot, lv_color_hex(0x00C853), 0);
     } else {
-      snprintf(buf, sizeof(buf), "HR: -- bpm\nSpO2: --%%");
-      lv_obj_set_style_bg_color(status_dot, lv_color_hex(0x666666), 0);
+      snprintf(buf, sizeof(buf), "HR: --\nSpO2: --");
     }
+    lv_obj_set_style_bg_color(status_dot,
+                              connected_status ? lv_color_hex(0x00C853)
+                                               : lv_color_hex(0x666666),
+                              0);
     lv_label_set_text(hr_label, buf);
+    lv_obj_invalidate(hr_label);
   }
 
   if (activity_label) {
-    char buf[64];
-    if (!connected_status) {
-      snprintf(buf, sizeof(buf), "Activity\n--");
+    char buf[60];
+    if (!hasSensorData) {
+      snprintf(buf, sizeof(buf), "Activity:\n--");
       lv_obj_set_style_text_color(activity_label, lv_color_hex(0x888888), 0);
     } else if (fallState == FALL_DETECTED) {
-      snprintf(buf, sizeof(buf), "FALL\nDETECTED");
-      lv_obj_set_style_text_color(activity_label, lv_color_hex(0xFF3B1F), 0);
+      snprintf(buf, sizeof(buf), "FALL\nDETECTED!");
+      lv_obj_set_style_text_color(activity_label, lv_color_hex(0xFF2200), 0);
     } else if (fallState == FALL_SLIP) {
-      snprintf(buf, sizeof(buf), "SLIP / FALL");
-      lv_obj_set_style_text_color(activity_label, lv_color_hex(0xFFA500), 0);
+      snprintf(buf, sizeof(buf), "SLIP\nFALL!");
+      lv_obj_set_style_text_color(activity_label, lv_color_hex(0xFF00CC), 0);
     } else {
-      snprintf(buf, sizeof(buf), "Activity\n%s", activityStr(activityState));
-      lv_obj_set_style_text_color(activity_label, activityColor(activityState), 0);
+      snprintf(buf, sizeof(buf), "Activity:\n%s", activityStr(activityState));
+      switch (activityState) {
+        case ACT_STILL:
+          lv_obj_set_style_text_color(activity_label, lv_color_hex(0x00CC00), 0);
+          break;
+        case ACT_WALKING:
+          lv_obj_set_style_text_color(activity_label, lv_color_hex(0x00DDFF), 0);
+          break;
+        case ACT_RUNNING:
+          lv_obj_set_style_text_color(activity_label, lv_color_hex(0xFF8800), 0);
+          break;
+        case ACT_JUMPING:
+          lv_obj_set_style_text_color(activity_label, lv_color_hex(0xFFDD00), 0);
+          break;
+        case ACT_MOVING:
+          lv_obj_set_style_text_color(activity_label, lv_color_hex(0x00AAFF), 0);
+          break;
+        default:
+          lv_obj_set_style_text_color(activity_label, lv_color_hex(0x888888), 0);
+          break;
+      }
     }
     lv_label_set_text(activity_label, buf);
+    lv_obj_invalidate(activity_label);
   }
 
-  if (main_screen) {
-    lv_obj_invalidate(main_screen);
-  }
+  if (main_screen) lv_obj_invalidate(main_screen);
+  lv_refr_now(NULL);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -993,15 +1019,6 @@ static bool connectToServer() {
     pRemoteChar->registerForNotify(notifyCallback);
   }
 
-  if (pRemoteChar->canRead()) {
-    String initialValue = pRemoteChar->readValue();
-    if (initialValue.length() > 0) {
-      Serial.print("[PI READ] ");
-      Serial.println(initialValue);
-      processIncomingPayload(initialValue);
-    }
-  }
-
   connected_status = true;
   update_UI = true;
   Serial.println("[PI] Connected and subscribed");
@@ -1085,17 +1102,6 @@ void loop() {
   }
 
   if (pClient != nullptr && pClient->isConnected()) {
-    if (pRemoteChar != nullptr && pRemoteChar->canRead() &&
-        (millis() - lastReadPollMs) >= READ_POLL_MS) {
-      lastReadPollMs = millis();
-      String polledValue = pRemoteChar->readValue();
-      if (polledValue.length() > 0) {
-        Serial.print("[PI POLL] ");
-        Serial.println(polledValue);
-        processIncomingPayload(polledValue);
-      }
-    }
-
     if (last_notify != 0 && (millis() - last_notify) > Timeout) {
       last_notify = 0;
       connected_status = false;
