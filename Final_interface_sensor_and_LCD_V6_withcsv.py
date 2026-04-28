@@ -150,7 +150,7 @@ def calc_spo2(raw_red, raw_ir, filt_red, filt_ir):
 
    
     valid  = spo2[(spo2 >= 80) & (spo2 < 100)]
-    return stats.trim_mean(valid, proportiontocut=0.1) if len(valid) >= 5 else np.nan
+    return stats.trim_mean(valid, proportiontocut=0.1) if len(valid) >= 5 else 75
 
 def calc_hr(filt_ir, time_buf):
     
@@ -166,7 +166,7 @@ def calc_hr(filt_ir, time_buf):
         return 0.0
     avg_inter_peak = np.mean(np.array(inter_peak))
     hr = 60.0 / avg_inter_peak
-    print(f"[HR]   {hr:.0f} bpm  (avg IBI={avg_inter_peak*1000:.0f} ms over {len(inter_peak)} intervals)")
+    print(f"[HR]   {hr:.0f} bpm ")
     return hr
 
 # ═══════════════════════════════════════════════════════════════════════════════
